@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="绕圈圈">
+<meta name="theme-color" content="#0b0b1a">
+<meta name="description" content="一根手指就能玩：点击在内外圈之间切换，躲障碍、吃宝石，越转越快。">
+<title>绕圈圈 Orbit Flip</title>
+<style>
+html,body{margin:0;height:100%;background:#0b0b1a;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",sans-serif;color:#fff}
+canvas{position:fixed;inset:0;display:block}
+#hud{position:fixed;left:0;right:0;top:calc(env(safe-area-inset-top) + 20px);text-align:center;pointer-events:none;transition:opacity .2s}
+#score{font-size:64px;font-weight:900;letter-spacing:-2px;line-height:1;text-shadow:0 0 24px rgba(255,255,255,.35)}
+#best{font-size:13px;opacity:.55;margin-top:6px}
+.ov{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;padding:24px;background:rgba(8,8,20,.55);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);transition:opacity .25s}
+.hide{opacity:0;pointer-events:none}
+h1{font-size:52px;margin:0;font-weight:900;background:linear-gradient(90deg,#ff4fd8,#4fd8ff);-webkit-background-clip:text;background-clip:text;color:transparent;letter-spacing:2px}
+.sub{opacity:.8;font-size:15px;line-height:1.7}
+.btn{appearance:none;-webkit-appearance:none;border:0;border-radius:999px;padding:16px 40px;font-size:19px;font-weight:800;color:#0b0b1a;background:#fff;box-shadow:0 0 30px rgba(79,216,255,.55);font-family:inherit}
+.btn:active{transform:scale(.96)}
+.btn.ghost{background:transparent;color:#fff;border:2px solid rgba(255,255,255,.45);box-shadow:none;font-size:15px;padding:12px 26px}
+.big{font-size:96px;font-weight:900;line-height:1;text-shadow:0 0 40px rgba(255,79,216,.5)}
+.tag{font-size:14px;opacity:.7}
+.newbest{color:#ffd84f;font-weight:900;font-size:18px;min-height:22px}
+#rank{font-size:20px;font-weight:800}
+#toast{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom) + 40px);transform:translateX(-50%);background:#fff;color:#000;padding:10px 18px;border-radius:999px;font-size:14px;font-weight:700;transition:opacity .3s;pointer-events:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud" class="hide"><div id="score">0</div><div id="best"></div></div>
+
+<div id="menu" class="ov">
+  <h1>绕圈圈</h1>
+  <div class="sub">点击屏幕，在 <b>内圈 / 外圈</b> 之间切换<br>躲开障碍 · 吃掉 ◆ · 越转越快<br><span style="opacity:.7">最后一刻闪开 = 惊险连击加分</span></div>
+  <button class="btn" id="startBtn">开始</button>
+  <div class="tag" id="menuBest"></div>
+</div>
+
+<div id="over" class="ov hide">
+  <div class="tag">本局得分</div>
+  <div class="big" id="final">0</div>
+  <div class="newbest" id="nb"></div>
+  <div id="rank"></div>
+  <div class="tag" id="overBest"></div>
+  <button class="btn" id="againBtn">再来一局</button>
+  <button class="btn ghost" id="shareBtn">分享给朋友挑战</button>
+</div>
+<div id="toast" class="hide"></div>
+
+<script>
+(() => {
+const $ = id => document.getElementById(id);
+const cv = $('c'), ctx = cv.getContext('2d');
+const TAU = Math.PI * 2;
+let W, H, cx, cy, S, RO, RI, TH, PR;
+
+function resize() {
+  const d = Math.min(window.devicePixelRatio || 1, 3);
+  W = innerWidth; H = innerHeight;
+  cv.width = W * d; cv.height = H * d;
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  ctx.setTransform(d, 0, 0, d, 0, 0);
+  S = Math.min(W, H * 0.72);
+  cx = W / 2; cy = H * 0.56;
+  RO = S * 0.40; RI = S * 0.25; TH = S * 0.05; PR = S * 0.028;
+}
+addEventListener('resize', resize); resize();
+
+// ---------- storage ----------
+const load = () => { try { return +localStorage.getItem('orbit_best') || 0; } catch (e) { return 0; } };
+const save = v => { try { localStorage.setItem('orbit_best', v); } catch (e) {} };
+let best = load();
+
+// ---------- audio ----------
+let ac;
+function unlock() {
+  try {
+    if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
+    if (ac.state === 'suspended') ac.resume();
+  } catch (e) {}
+}
+function beep(f, dur = 0.08, type = 'sine', vol = 0.12, slide = 0) {
+  if (!ac) return;
+  const t0 = ac.currentTime, o = ac.createOscillator(), g = ac.createGain();
+  o.type = type; o.frequency.setValueAtTime(f, t0);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, f + slide), t0 + dur);
+  g.gain.setValueAtTime(vol, t0);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  o.connect(g); g.connect(ac.destination);
+  o.start(t0); o.stop(t0 + dur + 0.02);
+}
+const buzz = ms => { try { navigator.vibrate && navigator.vibrate(ms); } catch (e) {} };
+
+// ---------- state ----------
+let state = 'menu', score, combo, t, p, objs, spawnA, parts = [], pops = [], shake = 0, flash = 0, hue = 210, speed, deadAt = 0, lastScore = 0;
+
+function reset() {
+  score = 0; combo = 0; t = 0; speed = 1.7;
+  p = { a: 0, ring: 1, rr: 1, sw: -9, trail: [] };
+  objs = []; spawnA = Math.PI * 0.95;
+  pops = [];
+}
+reset();
+
+const rnd = (a, b) => a + Math.random() * (b - a);
+const diff = () => Math.min(1, score / 90);
+const ringR = r => r ? RO : RI;
+const HALF = 0.17; // angular half width of a block
+
+function addBlock(a, ring, half = HALF) { objs.push({ k: 'b', a, ring, half }); }
+function addCoin(a, ring) { objs.push({ k: 'c', a, ring }); }
+
+function spawn() {
+  const d = diff(), w = speed;
+  const gapT = () => rnd(0.55, 1.0) * (1.25 - 0.55 * d);
+  const r = Math.random();
+  if (score < 4 || r < 0.42) {
+    const ring = Math.random() < 0.5 ? 0 : 1;
+    addBlock(spawnA, ring);
+    if (Math.random() < 0.35) addCoin(spawnA, ring ^ 1);
+    spawnA += w * gapT();
+  } else if (r < 0.70) {
+    // zigzag
+    let ring = Math.random() < 0.5 ? 0 : 1;
+    const n = 3 + Math.floor(Math.random() * 2 + d * 2.5);
+    const tg = 0.66 - 0.26 * d;
+    for (let i = 0; i < n; i++) {
+      addBlock(spawnA, ring);
+      ring ^= 1;
+      spawnA += w * tg;
+    }
+    spawnA += w * 0.35;
+  } else if (r < 0.86) {
+    // long wall with coin trail on the safe ring
+    const ring = Math.random() < 0.5 ? 0 : 1;
+    const half = rnd(0.35, 0.55 + 0.4 * d);
+    addBlock(spawnA + half, ring, half);
+    const n = Math.max(2, Math.floor(half * 2 / 0.22));
+    for (let i = 0; i <= n; i++) addCoin(spawnA + (2 * half) * i / n, ring ^ 1);
+    spawnA += 2 * half + w * gapT();
+  } else {
+    // coin snake that weaves between rings
+    let ring = Math.random() < 0.5 ? 0 : 1;
+    for (let i = 0; i < 6; i++) {
+      addCoin(spawnA, ring);
+      if (i % 2 === 1) ring ^= 1;
+      spawnA += 0.22;
+    }
+    spawnA += w * gapT();
+  }
+}
+
+// ---------- fx ----------
+function polar(a, r) { const s = a - p.a - Math.PI / 2; return [cx + Math.cos(s) * r, cy + Math.sin(s) * r]; }
+function burst(x, y, n, h, spd = 1) {
+  for (let i = 0; i < n; i++) {
+    const ang = Math.random() * TAU, v = rnd(60, 260) * spd;
+    parts.push({ x, y, vx: Math.cos(ang) * v, vy: Math.sin(ang) * v, life: rnd(0.4, 0.9), max: 0.9, h, s: rnd(1.5, 4) });
+  }
+}
+function pop(txt, color) {
+  const pr = RI + (RO - RI) * p.rr;
+  pops.push({ txt, color, x: cx, y: cy - pr - PR * 2.5, life: 0.9 });
+}
+function toast(msg) {
+  const el = $('toast'); el.textContent = msg; el.classList.remove('hide');
+  clearTimeout(toast._t); toast._t = setTimeout(() => el.classList.add('hide'), 1600);
+}
+
+// ---------- game flow ----------
+function start() {
+  unlock();
+  reset();
+  state = 'play';
+  $('menu').classList.add('hide');
+  $('over').classList.add('hide');
+  $('hud').classList.remove('hide');
+  updateHud();
+  beep(520, 0.12, 'triangle', 0.1, 400);
+}
+function updateHud() {
+  $('score').textContent = score;
+  $('best').textContent = '最高 ' + Math.max(best, score);
+}
+function rankOf(s) {
+  if (s < 10) return '🐣 热身中…';
+  if (s < 25) return '🙂 有点东西';
+  if (s < 45) return '🔥 手速达人';
+  if (s < 70) return '⚡ 转圈大师';
+  if (s < 100) return '👑 绕圈之神';
+  return '👽 人类极限？';
+}
+function die() {
+  state = 'over'; deadAt = performance.now();
+  const pr = RI + (RO - RI) * p.rr;
+  burst(cx, cy - pr, 46, hue + 180, 1.4);
+  shake = 18; flash = 1;
+  beep(180, 0.45, 'sawtooth', 0.15, -140);
+  buzz(80);
+  lastScore = score;
+  const isBest = score > best;
+  if (isBest) { best = score; save(best); }
+  setTimeout(() => {
+    $('final').textContent = score;
+    $('nb').textContent = isBest && score > 0 ? '🎉 新纪录！' : '';
+    $('rank').textContent = rankOf(score);
+    $('overBest').textContent = '最高分 ' + best;
+    $('hud').classList.add('hide');
+    $('over').classList.remove('hide');
+  }, 650);
+}
+function flip(e) {
+  if (e && e.cancelable) e.preventDefault();
+  unlock();
+  if (state !== 'play') return;
+  p.ring ^= 1; p.sw = t;
+  beep(p.ring ? 700 : 470, 0.05, 'triangle', 0.07);
+}
+
+// ---------- update ----------
+function update(dt) {
+  // particles & pops always animate
+  for (const q of parts) { q.x += q.vx * dt; q.y += q.vy * dt; q.vx *= 0.94; q.vy *= 0.94; q.life -= dt; }
+  parts = parts.filter(q => q.life > 0);
+  for (const q of pops) { q.y -= 40 * dt; q.life -= dt; }
+  pops = pops.filter(q => q.life > 0);
+  shake *= Math.pow(0.002, dt); flash = Math.max(0, flash - dt * 2.5);
+  const targetHue = 210 + Math.floor(score / 10) * 47;
+  hue += (targetHue - hue) * Math.min(1, dt * 2);
+
+  if (state === 'menu') { p.a += 0.9 * dt; p.rr += (p.ring - p.rr) * Math.min(1, dt * 28); trail(); return; }
+  if (state !== 'play') return;
+
+  t += dt;
+  speed = 1.7 + 2.0 * diff() + Math.max(0, score - 90) * 0.008;
+  p.a += speed * dt;
+  p.rr += (p.ring - p.rr) * Math.min(1, dt * 28);
+  trail();
+
+  while (spawnA < p.a + Math.PI * 1.25) spawn();
+
+  const pr = RI + (RO - RI) * p.rr;
+  const pAng = PR / pr;
+  for (const o of objs) {
+    const da = o.a - p.a, R = ringR(o.ring);
+    if (o.k === 'b') {
+      if (o.passed) continue;
+      if (Math.abs(da) < o.half + pAng * 0.7 && Math.abs(pr - R) < TH / 2 + PR * 0.6) { die(); return; }
+      if (da < -(o.half + pAng)) {
+        o.passed = true; score++;
+        if (t - p.sw < 0.28 && o.ring !== p.ring) {
+          combo = Math.min(combo + 1, 5);
+          score += combo;
+          pop(combo > 1 ? `惊险 x${combo}  +${combo + 1}` : '惊险! +2', '#ffd84f');
+          beep(880 + combo * 120, 0.1, 'square', 0.06);
+          const [x, y] = polar(p.a, pr); burst(x, y, 10 + combo * 4, 50);
+        } else {
+          combo = 0;
+          beep(300, 0.03, 'sine', 0.04);
+        }
+        updateHud();
+      }
+    } else if (!o.got) {
+      if (Math.abs(da) * R < PR * 1.8 && Math.abs(pr - R) < PR * 1.8) {
+        o.got = true; score += 2;
+        const [x, y] = polar(o.a, R); burst(x, y, 12, 160);
+        beep(1200, 0.07, 'sine', 0.08, 400);
+        updateHud();
+      }
+    }
+  }
+  objs = objs.filter(o => o.a > p.a - Math.PI * 0.7 && !(o.k === 'c' && o.got));
+}
+function trail() {
+  p.trail.push({ a: p.a, r: p.rr });
+  if (p.trail.length > 18) p.trail.shift();
+}
+
+// ---------- draw ----------
+function draw() {
+  const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W, H) * 0.8);
+  g.addColorStop(0, `hsl(${hue},55%,14%)`);
+  g.addColorStop(1, `hsl(${hue + 40},40%,4%)`);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  if (shake > 0.3) ctx.translate(rnd(-shake, shake), rnd(-shake, shake));
+
+  // rings
+  ctx.lineWidth = TH * 0.9;
+  ctx.strokeStyle = 'rgba(255,255,255,0.045)';
+  for (const R of [RI, RO]) { ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU); ctx.stroke(); }
+  ctx.lineWidth = 1.2;
+  ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+  for (const R of [RI, RO]) { ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU); ctx.stroke(); }
+
+  // core
+  const pulse = 1 + Math.sin(performance.now() / 300) * 0.05;
+  const cg = ctx.createRadialGradient(cx, cy, 0, cx, cy, RI * 0.6 * pulse);
+  cg.addColorStop(0, `hsla(${hue + 180},90%,65%,0.55)`);
+  cg.addColorStop(1, `hsla(${hue + 180},90%,65%,0)`);
+  ctx.fillStyle = cg; ctx.beginPath(); ctx.arc(cx, cy, RI * 0.6 * pulse, 0, TAU); ctx.fill();
+
+  // objects
+  const rot = -p.a - Math.PI / 2;
+  const bh = hue + 160;
+  ctx.lineCap = 'round';
+  for (const o of objs) {
+    const R = ringR(o.ring);
+    if (o.k === 'b') {
+      const s = o.a + rot;
+      ctx.lineWidth = TH;
+      ctx.strokeStyle = o.passed ? `hsla(${bh},80%,60%,0.25)` : `hsl(${bh},95%,62%)`;
+      ctx.shadowColor = `hsl(${bh},95%,60%)`; ctx.shadowBlur = o.passed ? 0 : 16;
+      ctx.beginPath(); ctx.arc(cx, cy, R, s - o.half, s + o.half); ctx.stroke();
+    } else {
+      const [x, y] = polar(o.a, R);
+      const sz = PR * 0.8 * (1 + Math.sin(performance.now() / 150 + o.a * 5) * 0.12);
+      ctx.shadowColor = '#ffd84f'; ctx.shadowBlur = 14;
+      ctx.fillStyle = '#ffe27a';
+      ctx.beginPath(); ctx.moveTo(x, y - sz); ctx.lineTo(x + sz * 0.75, y); ctx.lineTo(x, y + sz); ctx.lineTo(x - sz * 0.75, y); ctx.closePath(); ctx.fill();
+    }
+  }
+  ctx.shadowBlur = 0;
+
+  // player trail + player
+  if (state !== 'over') {
+    for (let i = 0; i < p.trail.length; i++) {
+      const tr = p.trail[i], k = i / p.trail.length;
+      const [x, y] = polar(tr.a, RI + (RO - RI) * tr.r);
+      ctx.fillStyle = `rgba(255,255,255,${k * 0.35})`;
+      ctx.beginPath(); ctx.arc(x, y, PR * (0.3 + k * 0.6), 0, TAU); ctx.fill();
+    }
+    const pr = RI + (RO - RI) * p.rr;
+    ctx.shadowColor = '#fff'; ctx.shadowBlur = 24;
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(cx, cy - pr, PR, 0, TAU); ctx.fill();
+    ctx.shadowBlur = 0;
+    if (combo > 0 && state === 'play') {
+      ctx.strokeStyle = `rgba(255,216,79,${0.4 + combo * 0.1})`; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(cx, cy - pr, PR * (1.5 + combo * 0.15), 0, TAU); ctx.stroke();
+    }
+  }
+
+  // particles
+  for (const q of parts) {
+    ctx.fillStyle = `hsla(${q.h},95%,65%,${Math.max(0, q.life / q.max)})`;
+    ctx.beginPath(); ctx.arc(q.x, q.y, q.s, 0, TAU); ctx.fill();
+  }
+  ctx.restore();
+
+  // pops
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (const q of pops) {
+    ctx.globalAlpha = Math.min(1, q.life * 2);
+    ctx.font = `900 ${Math.round(S * 0.055)}px -apple-system,"PingFang SC",sans-serif`;
+    ctx.fillStyle = q.color; ctx.fillText(q.txt, q.x, q.y);
+  }
+  ctx.globalAlpha = 1;
+
+  // tutorial hint
+  if (state === 'play' && t < 3 && score === 0) {
+    ctx.globalAlpha = Math.min(1, (3 - t));
+    ctx.font = `700 ${Math.round(S * 0.045)}px -apple-system,"PingFang SC",sans-serif`;
+    ctx.fillStyle = '#fff';
+    ctx.fillText('👆 点击切换轨道', cx, cy);
+    ctx.globalAlpha = 1;
+  }
+
+  if (flash > 0) { ctx.fillStyle = `rgba(255,80,120,${flash * 0.35})`; ctx.fillRect(0, 0, W, H); }
+}
+
+// ---------- loop ----------
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.033, (now - last) / 1000); last = now;
+  update(dt); draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ---------- input ----------
+cv.addEventListener('touchstart', flip, { passive: false });
+cv.addEventListener('mousedown', flip);
+document.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
+document.addEventListener('gesturestart', e => e.preventDefault());
+addEventListener('keydown', e => {
+  if (e.code !== 'Space' && e.code !== 'Enter' && e.code !== 'ArrowUp' && e.code !== 'ArrowDown') return;
+  e.preventDefault();
+  if (state === 'play') flip();
+  else if (state === 'menu' || performance.now() - deadAt > 900) start();
+});
+
+$('startBtn').addEventListener('click', start);
+$('againBtn').addEventListener('click', e => { e.stopPropagation(); start(); });
+$('over').addEventListener('click', e => {
+  if (e.target.closest('#shareBtn')) return;
+  if (performance.now() - deadAt > 900) start();
+});
+$('shareBtn').addEventListener('click', async e => {
+  e.stopPropagation();
+  const url = location.href.split('#')[0].split('?')[0];
+  const text = `我在「绕圈圈」拿了 ${lastScore} 分（${rankOf(lastScore).slice(2).trim()}），你能超过我吗？`;
+  if (navigator.share) {
+    try { await navigator.share({ title: '绕圈圈', text, url }); } catch (err) {}
+  } else {
+    try { await navigator.clipboard.writeText(text + ' ' + url); toast('链接已复制，发给朋友吧'); }
+    catch (err) { toast(url); }
+  }
+});
+
+$('menuBest').textContent = best ? '最高分 ' + best : '';
+})();
+</script>
+</body>
+</html>
